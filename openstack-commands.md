@@ -15,247 +15,30 @@
 
 DockerコンテナでOpenStack環境を構築する方法です。ホストマシンを汚さずに、簡単にOpenStack環境を試すことができます。
 
-### 方法1: Kolla-Ansibleを使用したOpenStack構築
+### 🔧 Docker環境の準備
 
-#### Dockerfile
+#### Dockerのディスク容量を増やす
 
-```dockerfile
-FROM ubuntu:22.04
-
-# タイムゾーンの設定（対話を避ける）
-ENV DEBIAN_FRONTEND=noninteractive
-ENV TZ=Asia/Tokyo
-
-# 基本パッケージのインストール
-RUN apt-get update && apt-get install -y \
-    python3 \
-    python3-pip \
-    python3-dev \
-    git \
-    vim \
-    curl \
-    wget \
-    sudo \
-    systemd \
-    systemd-sysv \
-    && apt-get clean
-
-# Ansibleとkolla-ansibleのインストール
-RUN pip3 install -U pip && \
-    pip3 install 'ansible>=6,<8' \
-    kolla-ansible
-
-# OpenStackクライアントのインストール
-RUN pip3 install python-openstackclient \
-    python-glanceclient \
-    python-novaclient \
-    python-neutronclient \
-    python-keystoneclient
-
-# 作業ディレクトリの作成
-WORKDIR /opt/openstack
-
-# スクリプトをコピー（後で作成）
-COPY setup-openstack.sh /opt/openstack/
-RUN chmod +x /opt/openstack/setup-openstack.sh
-
-# ポートの公開
-EXPOSE 80 443 5000 8774 9292 9696
-
-CMD ["/bin/bash"]
-```
-
-#### setup-openstack.sh
+ビルド前に以下を確認してください：
 
 ```bash
-#!/bin/bash
+# Dockerのディスク使用状況確認
+docker system df
 
-# Kolla-Ansibleの設定ディレクトリを作成
-mkdir -p /etc/kolla
-chown $USER:$USER /etc/kolla
+# 不要なイメージ・コンテナ・ボリュームを削除
+docker system prune -a --volumes
 
-# デフォルト設定をコピー
-cp -r /usr/local/share/kolla-ansible/etc_examples/kolla/* /etc/kolla/
-cp /usr/local/share/kolla-ansible/ansible/inventory/all-in-one /opt/openstack/
-
-# globals.ymlの基本設定
-cat > /etc/kolla/globals.yml << EOF
----
-kolla_base_distro: "ubuntu"
-kolla_install_type: "source"
-openstack_release: "zed"
-kolla_internal_vip_address: "127.0.0.1"
-network_interface: "eth0"
-neutron_external_interface: "eth1"
-enable_haproxy: "no"
-enable_cinder: "no"
-enable_cinder_backup: "no"
-enable_cinder_backend_lvm: "no"
-EOF
-
-# パスワードの生成
-kolla-genpwd
-
-echo "OpenStack setup script completed!"
-echo "Run the following commands to deploy:"
-echo "  kolla-ansible -i all-in-one bootstrap-servers"
-echo "  kolla-ansible -i all-in-one prechecks"
-echo "  kolla-ansible -i all-in-one deploy"
-```
-
-#### Dockerコマンド
-
-```bash
-# Dockerイメージのビルド
-docker build -t openstack-kolla .
-
-# コンテナの起動（特権モードで起動）
-docker run -d --privileged \
-  --name openstack-dev \
-  -p 80:80 \
-  -p 443:443 \
-  -p 5000:5000 \
-  -p 8774:8774 \
-  -p 9292:9292 \
-  -p 9696:9696 \
-  -v /sys/fs/cgroup:/sys/fs/cgroup:ro \
-  openstack-kolla
-
-# コンテナに入る
-docker exec -it openstack-dev /bin/bash
-
-# OpenStackのデプロイ（コンテナ内で実行）
-cd /opt/openstack
-./setup-openstack.sh
-
-# デプロイの実行
-kolla-ansible -i all-in-one bootstrap-servers
-kolla-ansible -i all-in-one prechecks
-kolla-ansible -i all-in-one deploy
-
-# 認証情報の取得
-kolla-ansible post-deploy
-source /etc/kolla/admin-openrc.sh
-
-# OpenStackの動作確認
-openstack service list
+# Docker Desktopの場合、設定で仮想ディスクサイズを増やす
+# Preferences → Resources → Disk image size を 64GB以上に設定
 ```
 
 ---
 
-### 方法2: DevStackを使用したシンプルな構築
+### 方法1: OpenStackクライアントのみ（最軽量・推奨）
 
-#### Dockerfile
+既存のOpenStack環境に接続するためのクライアントのみをインストールする方法です。**ディスク容量が限られている場合はこの方法を推奨します。**
 
-```dockerfile
-FROM ubuntu:22.04
-
-# タイムゾーン設定
-ENV DEBIAN_FRONTEND=noninteractive
-ENV TZ=Asia/Tokyo
-
-# 基本パッケージのインストール
-RUN apt-get update && apt-get install -y \
-    git \
-    sudo \
-    python3 \
-    python3-pip \
-    vim \
-    curl \
-    wget \
-    net-tools \
-    iputils-ping \
-    bridge-utils \
-    && apt-get clean
-
-# stackユーザーの作成
-RUN useradd -s /bin/bash -d /opt/stack -m stack && \
-    echo "stack ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers
-
-# stackユーザーに切り替え
-USER stack
-WORKDIR /opt/stack
-
-# DevStackのクローン
-RUN git clone https://opendev.org/openstack/devstack
-
-# local.confの作成
-RUN cd devstack && cat > local.conf << 'EOF'
-[[local|localrc]]
-
-# パスワード設定
-ADMIN_PASSWORD=secret
-DATABASE_PASSWORD=secret
-RABBIT_PASSWORD=secret
-SERVICE_PASSWORD=secret
-
-# ホストIP設定
-HOST_IP=127.0.0.1
-
-# ログ設定
-LOGFILE=$DEST/logs/stack.sh.log
-VERBOSE=True
-LOG_COLOR=False
-
-# 最小限のサービス
-disable_all_services
-enable_service key mysql rabbit
-enable_service n-api n-cpu n-cond n-sch
-enable_service g-api
-enable_service q-svc q-agt q-dhcp q-l3 q-meta
-
-# Horizonを有効化（オプション）
-# enable_service horizon
-
-# イメージ設定
-DOWNLOAD_DEFAULT_IMAGES=True
-IMAGE_URLS="http://download.cirros-cloud.net/0.6.2/cirros-0.6.2-x86_64-disk.img"
-
-RECLONE=yes
-EOF
-
-# ポート公開
-EXPOSE 5000 8774 9292 9696 80
-
-CMD ["/bin/bash"]
-```
-
-#### Dockerコマンド
-
-```bash
-# Dockerイメージのビルド
-docker build -t openstack-devstack .
-
-# コンテナの起動
-docker run -it --privileged \
-  --name openstack-dev \
-  -p 5000:5000 \
-  -p 8774:8774 \
-  -p 9292:9292 \
-  -p 9696:9696 \
-  -p 80:80 \
-  -v /sys/fs/cgroup:/sys/fs/cgroup:ro \
-  openstack-devstack /bin/bash
-
-# コンテナ内でDevStackをインストール（初回のみ）
-cd /opt/stack/devstack
-./stack.sh
-
-# 認証情報の読み込み
-source /opt/stack/devstack/openrc admin admin
-
-# OpenStackの動作確認
-openstack service list
-openstack endpoint list
-```
-
----
-
-### 方法3: OpenStackクライアントのみ（最もシンプル）
-
-既存のOpenStack環境に接続するためのクライアントのみをインストールする方法です。
-
-#### Dockerfile
+#### Dockerfile（クライアント専用・軽量版）
 
 ```dockerfile
 FROM python:3.11-slim
@@ -264,13 +47,12 @@ FROM python:3.11-slim
 ENV DEBIAN_FRONTEND=noninteractive
 ENV TZ=Asia/Tokyo
 
-# 基本パッケージのインストール
-RUN apt-get update && apt-get install -y \
-    vim \
+# 最小限のパッケージのみインストール
+RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
-    wget \
-    git \
-    && apt-get clean
+    ca-certificates \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
 
 # OpenStackクライアントのインストール
 RUN pip install --no-cache-dir \
@@ -286,6 +68,7 @@ WORKDIR /workspace
 
 # 認証情報用のテンプレート作成
 RUN cat > /workspace/openrc.sh.template << 'EOF'
+# OpenStack認証情報
 export OS_AUTH_URL=http://your-openstack-server:5000/v3
 export OS_PROJECT_NAME=admin
 export OS_USERNAME=admin
@@ -299,11 +82,11 @@ EOF
 CMD ["/bin/bash"]
 ```
 
-#### Dockerコマンド
+#### 使用方法
 
 ```bash
-# イメージのビルド
-docker build -t openstack-client .
+# イメージのビルド（1GB未満）
+docker build -t openstack-client -f Dockerfile.client .
 
 # コンテナの起動
 docker run -it --rm \
@@ -312,23 +95,127 @@ docker run -it --rm \
   openstack-client /bin/bash
 
 # コンテナ内で認証情報を設定
-# openrc.sh.templateを編集してopenrc.shとして保存
 cp openrc.sh.template openrc.sh
-vim openrc.sh
+vi openrc.sh  # 実際の環境情報に編集
 
 # 認証情報の読み込み
 source openrc.sh
 
 # OpenStackコマンドの実行
+openstack --version
+openstack service list
 openstack server list
-openstack network list
 ```
 
 ---
 
-### Docker Composeでの構築（推奨）
+### 方法2: DevStack（軽量版・ディスク容量節約）
 
-複数のサービスをまとめて管理する場合は、Docker Composeを使用します。
+学習用のOpenStack環境を構築します。**10GB以上の空き容量が必要です。**
+
+#### Dockerfile（DevStack軽量版）
+
+```dockerfile
+FROM ubuntu:22.04
+
+# タイムゾーン設定
+ENV DEBIAN_FRONTEND=noninteractive
+ENV TZ=Asia/Tokyo
+
+# レイヤーを分けて、不要なファイルを都度削除
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+    git \
+    sudo \
+    python3 \
+    python3-pip \
+    curl \
+    net-tools \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
+
+# stackユーザーの作成
+RUN useradd -s /bin/bash -d /opt/stack -m stack && \
+    echo "stack ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers
+
+# stackユーザーに切り替え
+USER stack
+WORKDIR /opt/stack
+
+# DevStackのクローン（最新版のみ）
+RUN git clone https://opendev.org/openstack/devstack --depth=1
+
+# local.confの作成（最小構成）
+RUN cd devstack && cat > local.conf << 'EOF'
+[[local|localrc]]
+
+# パスワード設定
+ADMIN_PASSWORD=secret
+DATABASE_PASSWORD=secret
+RABBIT_PASSWORD=secret
+SERVICE_PASSWORD=secret
+
+# ホストIP設定
+HOST_IP=127.0.0.1
+
+# ログ設定（ディスク節約のため最小限）
+LOGFILE=$DEST/logs/stack.sh.log
+VERBOSE=False
+LOG_COLOR=False
+
+# 最小限のサービスのみ
+disable_all_services
+enable_service key mysql rabbit
+enable_service n-api n-cpu n-cond n-sch
+enable_service g-api
+enable_service q-svc q-agt q-dhcp q-l3 q-meta
+
+# イメージは手動でアップロード（自動ダウンロードを無効化）
+DOWNLOAD_DEFAULT_IMAGES=False
+
+# キャッシュディレクトリの設定
+DEST=/opt/stack
+DATA_DIR=$DEST/data
+
+RECLONE=yes
+EOF
+
+# ポート公開
+EXPOSE 5000 8774 9292 9696
+
+CMD ["/bin/bash"]
+```
+
+#### 使用方法
+
+```bash
+# イメージのビルド
+docker build -t openstack-devstack-lite -f Dockerfile.devstack-lite .
+
+# コンテナの起動（特権モードが必要）
+docker run -it --privileged \
+  --name openstack-dev \
+  -p 5000:5000 \
+  -p 8774:8774 \
+  -p 9292:9292 \
+  -p 9696:9696 \
+  -v openstack-data:/opt/stack/data \
+  openstack-devstack-lite /bin/bash
+
+# コンテナ内でDevStackをインストール
+cd /opt/stack/devstack
+./stack.sh
+
+# 認証情報の読み込み
+source /opt/stack/devstack/openrc admin admin
+
+# 動作確認
+openstack service list
+```
+
+---
+
+### 方法3: Docker Compose（複数サービス管理・推奨）
 
 #### docker-compose.yml
 
@@ -336,37 +223,30 @@ openstack network list
 version: '3.8'
 
 services:
+  # OpenStackクライアント（軽量）
   openstack-client:
-    build:
-      context: .
-      dockerfile: Dockerfile.client
+    image: python:3.11-slim
     container_name: openstack-client
     volumes:
       - ./workspace:/workspace
       - ./credentials:/credentials
-    networks:
-      - openstack-net
+    working_dir: /workspace
+    command: >
+      bash -c "
+        pip install --no-cache-dir python-openstackclient python-keystoneclient python-glanceclient python-novaclient python-neutronclient &&
+        /bin/bash
+      "
     stdin_open: true
     tty: true
-
-  # 将来的にDevStackやKollaを追加可能
-  # devstack:
-  #   build:
-  #     context: .
-  #     dockerfile: Dockerfile.devstack
-  #   privileged: true
-  #   ports:
-  #     - "5000:5000"
-  #     - "8774:8774"
-  #   networks:
-  #     - openstack-net
+    networks:
+      - openstack-net
 
 networks:
   openstack-net:
     driver: bridge
 ```
 
-#### Docker Composeコマンド
+#### 使用方法
 
 ```bash
 # サービスの起動
@@ -375,72 +255,148 @@ docker-compose up -d
 # クライアントコンテナに入る
 docker-compose exec openstack-client /bin/bash
 
-# ログの確認
-docker-compose logs -f
+# 認証情報の設定
+cat > /workspace/openrc.sh << 'EOF'
+export OS_AUTH_URL=http://your-openstack-server:5000/v3
+export OS_PROJECT_NAME=admin
+export OS_USERNAME=admin
+export OS_PASSWORD=secret
+export OS_USER_DOMAIN_NAME=Default
+export OS_PROJECT_DOMAIN_NAME=Default
+export OS_IDENTITY_API_VERSION=3
+EOF
+
+source /workspace/openrc.sh
+
+# OpenStackコマンドの実行
+openstack server list
 
 # サービスの停止
 docker-compose down
+```
 
-# サービスの停止とボリュームの削除
-docker-compose down -v
+---
+
+### ディスク容量問題の解決方法
+
+#### 問題: "No space left on device" エラー
+
+**解決策1: Dockerのディスク容量を増やす**
+
+```bash
+# Docker Desktop（Mac/Windows）の場合
+# 1. Docker Desktop を開く
+# 2. Settings → Resources → Advanced
+# 3. Disk image size を 64GB 以上に設定
+# 4. Apply & Restart
+
+# Linux の場合
+# Docker のデータディレクトリを確認
+docker info | grep "Docker Root Dir"
+
+# ディスク容量の確認
+df -h
+
+# 不要なDockerリソースを削除
+docker system prune -a --volumes
+```
+
+**解決策2: 軽量版Dockerfileを使用**
+
+vimなどの大きなパッケージを削除：
+
+```dockerfile
+FROM ubuntu:22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# 最小限のパッケージのみ（vimは除外）
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+    git \
+    sudo \
+    python3 \
+    python3-pip \
+    curl \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
+
+# 以下、同様...
+```
+
+**解決策3: マルチステージビルドを使用**
+
+```dockerfile
+# ビルドステージ
+FROM ubuntu:22.04 AS builder
+RUN apt-get update && apt-get install -y git python3
+RUN git clone https://opendev.org/openstack/devstack --depth=1
+
+# 実行ステージ（軽量）
+FROM ubuntu:22.04
+COPY --from=builder /path/to/devstack /opt/stack/devstack
+# 必要な最小限のパッケージのみインストール
 ```
 
 ---
 
 ### トラブルシューティング
 
-#### コンテナ内でsystemdが動作しない場合
+#### 1. ディスク容量不足
 
 ```bash
-# 特権モードで起動
-docker run -it --privileged \
-  --name openstack-dev \
-  -v /sys/fs/cgroup:/sys/fs/cgroup:ro \
-  openstack-devstack /bin/bash
+# 現在のディスク使用状況
+docker system df -v
+
+# 未使用のイメージを削除
+docker image prune -a
+
+# 停止中のコンテナを削除
+docker container prune
+
+# 未使用のボリュームを削除
+docker volume prune
+
+# すべて削除（注意！）
+docker system prune -a --volumes
 ```
 
-#### ネットワークの問題
+#### 2. ビルドが遅い
 
 ```bash
-# ホストのネットワークを使用
-docker run -it --network host \
-  openstack-client /bin/bash
+# BuildKitを使用（高速化）
+export DOCKER_BUILDKIT=1
+docker build -t openstack-client .
 
-# カスタムネットワークの作成
-docker network create --driver bridge openstack-net
-docker run -it --network openstack-net \
-  openstack-client /bin/bash
+# キャッシュを使わずにビルド
+docker build --no-cache -t openstack-client .
 ```
 
-#### ボリュームマウントでデータを永続化
+#### 3. メモリ不足
 
 ```bash
-# ホストのディレクトリをマウント
-docker run -it \
-  -v $(pwd)/openstack-data:/opt/stack \
-  -v $(pwd)/logs:/var/log/openstack \
-  openstack-devstack /bin/bash
+# Docker Desktopのメモリ設定を増やす
+# Settings → Resources → Memory を 8GB 以上に設定
 ```
 
 ---
 
-### Docker環境での注意事項
+### 推奨する構築方法（ディスク容量別）
 
-1. **リソース制限**
-   - OpenStackは多くのリソースを必要とします
-   - Docker Desktopの場合、メモリを最低8GB、できれば16GB割り当ててください
+#### ケース1: ディスク容量が少ない（10GB未満）
+→ **方法1: OpenStackクライアントのみ**
+- 軽量（1GB未満）
+- 外部のOpenStack環境に接続して学習
 
-2. **特権モード**
-   - DevStackやKollaを実行する場合は`--privileged`フラグが必要です
-   - セキュリティリスクを理解した上で使用してください
+#### ケース2: ディスク容量が中程度（10-30GB）
+→ **方法2: DevStack軽量版**
+- 基本的なOpenStack環境を構築
+- ローカルでハンズオン可能
 
-3. **永続化**
-   - コンテナを削除するとデータが失われます
-   - ボリュームマウントを使用してデータを永続化してください
-
-4. **ネットワーク**
-   - OpenStackの仮想ネットワークとDockerのネットワークが競合する可能性があります
-   - ポートフォワーディングやネットワーク設定に注意してください
+#### ケース3: ディスク容量が十分（30GB以上）
+→ **Amazon Linux 2023 on EC2**
+- `setup-guide-amazon-linux.md` を参照
+- 本格的な学習環境を構築
 
 ---
 
